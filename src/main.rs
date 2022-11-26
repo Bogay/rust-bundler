@@ -1,14 +1,21 @@
 extern crate bundler;
+extern crate clap;
 
-use std::env;
-use std::process;
+use clap::Parser;
+
+/// Creates a single-source-file version of a Cargo package.
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Which bin to expand
+    #[arg(short, long)]
+    bin: Option<String>,
+    /// Cargo project path
+    project: String,
+}
 
 fn main() {
-    let args: Vec<_> = env::args().collect();
-    if args.len() != 2 {
-        eprintln!("Usage: bundle path/to/project");
-        process::exit(1);
-    }
-    let code = bundler::bundle(&args[1]);
+    let cli = Cli::parse();
+    let code = bundler::bundle(&cli.project, cli.bin.as_deref());
     println!("{}", code);
 }

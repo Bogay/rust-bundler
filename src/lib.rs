@@ -1,48 +1,59 @@
 //! See [README.md](https://github.com/slava-sh/rust-bundler/blob/master/README.md)
-extern crate cargo_metadata;
-extern crate quote;
-extern crate rustfmt;
-extern crate syn;
-
 use std::fs::File;
-use std::io::{Read, Sink};
+use std::io::Read;
 use std::mem;
 use std::path::Path;
 
+extern crate quote;
+extern crate syn;
 use quote::ToTokens;
 use syn::punctuated::Punctuated;
 use syn::visit_mut::VisitMut;
 
 /// Creates a single-source-file version of a Cargo package.
-pub fn bundle<P: AsRef<Path>>(package_path: P) -> String {
+pub fn bundle<P: AsRef<Path>>(package_path: P, bin: Option<&str>) -> String {
     let manifest_path = package_path.as_ref().join("Cargo.toml");
-    let metadata = cargo_metadata::metadata_deps(Some(&manifest_path), false)
+    let metadata = cargo_metadata::MetadataCommand::new()
+        .manifest_path(&manifest_path)
+        .exec()
         .expect("failed to obtain cargo metadata");
-    let targets = &metadata.packages[0].targets;
-    let bins: Vec<_> = targets.iter().filter(|t| target_is(t, "bin")).collect();
-    assert!(bins.len() != 0, "no binary target found");
-    assert!(bins.len() == 1, "multiple binary targets not supported");
-    let bin = bins[0];
-    let libs: Vec<_> = targets.iter().filter(|t| target_is(t, "lib")).collect();
+
+    let targets = &metadata.workspace_packages()[0].targets;
+    let bin = if let Some(bin) = bin {
+        targets
+            .iter()
+            .find(|t| t.name == bin)
+            .expect(&format!("can not find {} in Cargo.toml", bin))
+    } else {
+        let bins: Vec<_> = targets.iter().filter(|t| t.is_bin()).collect();
+        assert_ne!(bins.len(), 0, "no binary target found");
+        assert_eq!(
+            bins.len(),
+            1,
+            "multiple binary targets found. you must specify one target to bundle."
+        );
+        bins[0]
+    };
+
+    let libs: Vec<_> = targets.iter().filter(|t| t.is_lib()).collect();
     assert!(libs.len() <= 1, "multiple library targets not supported");
     let lib = libs.get(0).unwrap_or(&bin);
+
     let base_path = Path::new(&lib.src_path)
         .parent()
         .expect("lib.src_path has no parent");
     let crate_name = &lib.name;
+    eprintln!("found crate {}", crate_name);
     eprintln!("expanding binary {}", bin.src_path);
     let code = read_file(&Path::new(&bin.src_path)).expect("failed to read binary target source");
     let mut file = syn::parse_file(&code).expect("failed to parse binary target source");
     Expander {
         base_path,
         crate_name,
-    }.visit_file_mut(&mut file);
-    let code = file.into_tokens().to_string();
-    prettify(code)
-}
-
-fn target_is(target: &cargo_metadata::Target, target_kind: &str) -> bool {
-    target.kind.iter().any(|kind| kind == target_kind)
+    }
+    .visit_file_mut(&mut file);
+    let code = file.into_token_stream().to_string();
+    code
 }
 
 struct Expander<'a> {
@@ -95,18 +106,20 @@ impl<'a> Expander<'a> {
         let (base_path, code) = vec![
             (self.base_path, format!("{}.rs", name)),
             (&other_base_path, String::from("mod.rs")),
-        ].into_iter()
-            .flat_map(|(base_path, file_name)| {
-                read_file(&base_path.join(file_name)).map(|code| (base_path, code))
-            })
-            .next()
-            .expect("mod not found");
+        ]
+        .into_iter()
+        .flat_map(|(base_path, file_name)| {
+            read_file(&base_path.join(file_name)).map(|code| (base_path, code))
+        })
+        .next()
+        .expect("mod not found");
         eprintln!("expanding mod {} in {}", name, base_path.to_str().unwrap());
         let mut file = syn::parse_file(&code).expect("failed to parse file");
         Expander {
             base_path,
             crate_name: self.crate_name,
-        }.visit_file_mut(&mut file);
+        }
+        .visit_file_mut(&mut file);
         item.content = Some((Default::default(), file.items));
     }
 
@@ -166,7 +179,7 @@ fn is_extern_crate(item: &syn::Item, crate_name: &str) -> bool {
 
 fn path_starts_with(path: &syn::Path, segment: &str) -> bool {
     if let Some(el) = path.segments.first() {
-        if el.value().ident == segment {
+        if el.ident == segment {
             return true;
         }
     }
@@ -188,13 +201,4 @@ fn read_file(path: &Path) -> Option<String> {
     let mut buf = String::new();
     File::open(path).ok()?.read_to_string(&mut buf).ok()?;
     Some(buf)
-}
-
-fn prettify(code: String) -> String {
-    let config = Default::default();
-    let out: Option<&mut Sink> = None;
-    let result =
-        rustfmt::format_input(rustfmt::Input::Text(code), &config, out).expect("rustfmt failed");
-    let code = &result.1.first().expect("rustfmt returned no code").1;
-    format!("{}", code)
 }
